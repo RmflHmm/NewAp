@@ -331,8 +331,41 @@ async function savePhoto(lid,b64){if(!DB)await initDB();return new Promise((res,
 async function getPhoto(lid){if(!DB)await initDB();return new Promise((res,rej)=>{let t=DB.transaction([ST.PHOTO],"readonly"),s=t.objectStore(ST.PHOTO),r=s.get(lid);r.onsuccess=()=>res(r.result?.b64||null);r.onerror=()=>rej(r.error)})}
 async function delPhoto(lid){if(!DB)await initDB();return new Promise((res,rej)=>{let t=DB.transaction([ST.PHOTO],"readwrite"),s=t.objectStore(ST.PHOTO),r=s.delete(lid);r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
 
-async function init(){await initDB();checkAuth();setupNet();updateDT();setInterval(updateDT,1e3);getGPS();updateProg();checkDraft();updateQBadge();if(navigator.onLine)setTimeout(()=>autoSync(),3e3)}
-function checkAuth(){let s=getSess();if(s&&s.exp>Date.now()){S.drv=s;showMain();loadDrv()}else showLogin()}
+async function init(){
+  await initDB();
+  await checkAuth();
+  setupNet();
+  updateDT();
+  setInterval(updateDT,1000);
+  getGPS();
+  updateProg();
+  checkDraft();
+  updateQBadge();
+
+  if(navigator.onLine){
+    setTimeout(async()=>{
+      let ok=await checkDriverActiveNow();
+      if(ok) autoSync();
+    },3000);
+  }
+}
+
+async function checkAuth(){
+  let s=getSess();
+
+  if(s&&s.exp>Date.now()){
+    S.drv=s;
+    showMain();
+    loadDrv();
+
+    if(navigator.onLine){
+      await checkDriverActiveNow();
+    }
+
+  }else{
+    showLogin();
+  }
+}
 function getSess(){try{let d=localStorage.getItem(ST.SESS);return d?JSON.parse(d):null}catch(e){return null}}
 function saveSess(d){let s={...d,exp:Date.now()+CFG.SESSION_DAYS*864e5};localStorage.setItem(ST.SESS,JSON.stringify(s));S.drv=s}
 function clearSess(){localStorage.removeItem(ST.SESS);S.drv=null}
@@ -341,14 +374,115 @@ function showMain(){document.getElementById("loginScreen").style.display="none";
 
 function setLoginDebug(msg,obj){try{localStorage.setItem("rmfl_last_login_debug",JSON.stringify({time:new Date().toISOString(),message:msg,details:obj||null,url:CFG.API_URL,online:navigator.onLine}))}catch(e){}console.log("RMFL LOGIN DEBUG:",msg,obj||"")}
 
-async function apiJsonp(payload){return new Promise((resolve,reject)=>{let cb="rmfl_cb_"+Date.now()+"_"+Math.floor(Math.random()*10000);payload.callback=cb;let qs=Object.keys(payload).map(k=>encodeURIComponent(k)+"="+encodeURIComponent(payload[k]||"")).join("&");let sc=document.createElement("script"),done=false,timer=null;window[cb]=function(res){done=true;cleanup();resolve(res)};function cleanup(){if(timer)clearTimeout(timer);try{delete window[cb]}catch(e){window[cb]=undefined}if(sc&&sc.parentNode)sc.parentNode.removeChild(sc)}sc.onerror=function(){if(!done){cleanup();reject(new Error("Could not reach login server. Check password,or internet"))}};sc.src=CFG.API_URL+"?"+qs+"&t="+Date.now();document.body.appendChild(sc);timer=setTimeout(()=>{if(!done){cleanup();reject(new Error("Login request timed out. Backend did not return JSONP callback."))}},20000)})}
+async function apiJsonp(payload){
+  return new Promise((resolve,reject)=>{
+    let cb="rmfl_cb_"+Date.now()+"_"+Math.floor(Math.random()*10000);
+
+    payload.callback=cb;
+
+    let qs=Object.keys(payload)
+      .map(k=>encodeURIComponent(k)+"="+encodeURIComponent(payload[k]||""))
+      .join("&");
+
+    let sc=document.createElement("script"),
+        done=false,
+        timer=null;
+
+    window[cb]=function(res){
+      done=true;
+      cleanup();
+      resolve(res);
+    };
+
+    function cleanup(){
+      if(timer)clearTimeout(timer);
+
+      try{
+        delete window[cb];
+      }catch(e){
+        window[cb]=undefined;
+      }
+
+      if(sc&&sc.parentNode){
+        sc.parentNode.removeChild(sc);
+      }
+    }
+
+    sc.onerror=function(){
+      if(!done){
+        cleanup();
+        reject(new Error("Unable to connect. Please check your internet connection and try again."));
+      }
+    };
+
+    sc.src=CFG.API_URL+"?"+qs+"&t="+Date.now();
+    document.body.appendChild(sc);
+
+    timer=setTimeout(()=>{
+      if(!done){
+        cleanup();
+        reject(new Error("Request timed out. Please check your internet connection and try again."));
+      }
+    },20000);
+  });
+}
+async function checkDriverActiveNow(){
+  let s=getSess();
+
+  if(!s || !s.did){
+    return true;
+  }
+
+  if(!navigator.onLine){
+    return true;
+  }
+
+  try{
+    let result=await apiJsonp({
+      action:"check_status",
+      driverId:s.did,
+      t:Date.now()
+    });
+
+    if(!result || result.active!==true){
+      localStorage.removeItem(ST.SESS);
+      S.drv=null;
+
+      alert("Your account is inactive. Please contact IT support.");
+
+      showLogin();
+      return false;
+    }
+
+    return true;
+
+  }catch(e){
+    console.warn("Driver status check failed:",e);
+    return true;
+  }
+}
 
 async function handleLogin(){let id=document.getElementById("loginId").value.trim(),pw=document.getElementById("loginPassword").value,err=document.getElementById("loginError"),btn=document.getElementById("loginBtn");if(!id||!pw){err.textContent="Please enter both ID/phone and password";err.classList.add("show");return}if(!navigator.onLine){err.textContent="First login requires internet. After login, you can use the app offline.";err.classList.add("show");setLoginDebug("offline_first_login_blocked",{driverId:id});return}btn.disabled=true;btn.textContent="Signing in...";err.classList.remove("show");try{setLoginDebug("login_attempt_started",{driverId:id});let result=await apiJsonp({action:"login",driverId:id,password:pw});setLoginDebug("login_response_received",result);if(!result)throw new Error("Empty response from login server");if(!result.success)throw new Error(result.error||"Invalid credentials");let d=result.driver||{};if(!d.driverId||!d.name)throw new Error("Login server response missing driver details");saveSess({did:d.driverId,name:d.name,phone:d.phone,vreg:d.vehicleReg,county:d.county,token:result.token});showMain();loadDrv();err.classList.remove("show")}catch(e){setLoginDebug("login_failed",{message:e.message,driverId:id});err.textContent=e.message||"Login failed";err.classList.add("show")}finally{btn.disabled=false;btn.textContent="Sign In"}}
 
 function loadDrv(){let s=getSess();if(!s)return;document.getElementById("driverName").value=s.name||"";document.getElementById("driverId").value=s.did||"";document.getElementById("vehicleReg").value=s.vreg||"";document.getElementById("driverInfo").textContent="Driver: "+(s.name||"Unknown")+" • ID: "+(s.did||"N/A")}
 function logout(){clearSess();resetForm();showLogin()}
 
-function setupNet(){window.addEventListener("online",()=>{S.on=true;updateConn();autoSync()});window.addEventListener("offline",()=>{S.on=false;updateConn()});updateConn()}
+function setupNet(){
+  window.addEventListener("online",async()=>{
+    S.on=true;
+    updateConn();
+
+    let ok=await checkDriverActiveNow();
+    if(ok) autoSync();
+  });
+
+  window.addEventListener("offline",()=>{
+    S.on=false;
+    updateConn();
+  });
+
+  updateConn();
+}
 function updateConn(){let st=document.getElementById("connectionStatus"),tx=document.getElementById("connectionText"),dt=document.getElementById("driverDot");if(S.on){st.classList.remove("off");st.classList.add("on");tx.textContent="Online";dt.classList.remove("off")}else{st.classList.remove("on");st.classList.add("off");tx.textContent="Offline";dt.classList.add("off")}}
 
 function updateDT(){let n=new Date(),o={year:"numeric",month:"long",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:true};document.getElementById("dateTime").value=n.toLocaleString("en-GB",o)}
@@ -384,15 +518,195 @@ function updQueue(lid,up){let q=getQueue(),i=q.findIndex(x=>x.lid===lid);if(i>-1
 function genLid(){let n=new Date();return"LEAD-"+n.getFullYear()+String(n.getMonth()+1).padStart(2,"0")+String(n.getDate()).padStart(2,"0")+"-"+String(Math.floor(Math.random()*9e3)+1e3)}
 function updateQBadge(){let q=getQueue(),p=q.filter(x=>x.status==="pending").length,b=document.getElementById("queueBadge"),c=document.getElementById("queueCount");if(p===0){b.classList.add("empty");c.textContent="0 pending"}else{b.classList.remove("empty");c.textContent=p+" pending"}}
 
-async function autoSync(){if(!S.on||S.sync)return;let q=getQueue().filter(x=>x.status==="pending");if(q.length===0)return;await syncQ()}
-async function manualSync(){if(S.sync)return;if(!S.on){alert("You are offline. Connect to internet to sync.");return}let q=getQueue().filter(x=>x.status==="pending");if(q.length===0){alert("No pending leads to sync.");return}await syncQ()}
-async function syncQ(){S.sync=true;S.abort=false;let sb=document.getElementById("syncBtn");sb.classList.add("sy");sb.disabled=true;let q=getQueue().filter(x=>x.status==="pending"),tot=q.length,comp=0,fail=0;if(tot>1)document.getElementById("syncModal").classList.add("act");for(let it of q){if(S.abort)break;try{if(tot>1){document.getElementById("syncProgressText").textContent="Uploading lead "+(comp+1)+" of "+tot+"...";document.getElementById("syncProgressFill").style.width=Math.round(comp/tot*100)+"%"}let ph=await getPhoto(it.lid);if(ph)it.data.photoBase64=ph;await submitAPI(it.data);it.status="synced";updQueue(it.lid,{status:"synced"});await delPhoto(it.lid);comp++}catch(e){it.attempts++;if(it.attempts>=CFG.SYNC_RETRIES){it.status="failed";updQueue(it.lid,{status:"failed",attempts:it.attempts})}else updQueue(it.lid,{attempts:it.attempts});fail++}}S.sync=false;sb.classList.remove("sy");sb.disabled=false;document.getElementById("syncModal").classList.remove("act");updateQBadge();if(comp>0)alert("✅ "+comp+" lead(s) synced!"+(fail>0?" "+fail+" failed.":""));else if(fail>0)alert("❌ Sync failed for "+fail+" lead(s). Will retry.")}
+async function autoSync(){
+  if(!S.on||S.sync)return;
+
+  let ok=await checkDriverActiveNow();
+  if(!ok)return;
+
+  let q=getQueue().filter(x=>x.status==="pending");
+  if(q.length===0)return;
+
+  await syncQ();
+}
+
+async function manualSync(){
+  if(S.sync)return;
+
+  if(!S.on){
+    alert("You are offline. Connect to internet to sync.");
+    return;
+  }
+
+  let ok=await checkDriverActiveNow();
+  if(!ok)return;
+
+  let q=getQueue().filter(x=>x.status==="pending");
+
+  if(q.length===0){
+    alert("No pending leads to sync.");
+    return;
+  }
+
+  await syncQ();
+}
+
+async function syncQ(){
+  let ok=await checkDriverActiveNow();
+  if(!ok)return;
+
+  S.sync=true;
+  S.abort=false;
+
+  let sb=document.getElementById("syncBtn");
+  sb.classList.add("sy");
+  sb.disabled=true;
+
+  let q=getQueue().filter(x=>x.status==="pending"),
+      tot=q.length,
+      comp=0,
+      fail=0;
+
+  if(tot>1){
+    document.getElementById("syncModal").classList.add("act");
+  }
+
+  for(let it of q){
+    if(S.abort)break;
+
+    try{
+      if(tot>1){
+        document.getElementById("syncProgressText").textContent="Uploading lead "+(comp+1)+" of "+tot+"...";
+        document.getElementById("syncProgressFill").style.width=Math.round(comp/tot*100)+"%";
+      }
+
+      let ph=await getPhoto(it.lid);
+      if(ph)it.data.photoBase64=ph;
+
+      await submitAPI(it.data);
+
+      it.status="synced";
+      updQueue(it.lid,{status:"synced"});
+      await delPhoto(it.lid);
+
+      comp++;
+
+    }catch(e){
+      it.attempts++;
+
+      if(it.attempts>=CFG.SYNC_RETRIES){
+        it.status="failed";
+        updQueue(it.lid,{status:"failed",attempts:it.attempts});
+      }else{
+        updQueue(it.lid,{attempts:it.attempts});
+      }
+
+      fail++;
+    }
+  }
+
+  S.sync=false;
+  sb.classList.remove("sy");
+  sb.disabled=false;
+  document.getElementById("syncModal").classList.remove("act");
+  updateQBadge();
+
+  if(comp>0){
+    alert("✅ "+comp+" lead(s) synced!"+(fail>0?" "+fail+" failed.":""));
+  }else if(fail>0){
+    alert("❌ Sync failed for "+fail+" lead(s). Will retry.");
+  }
+}
 function cancelSync(){S.abort=true}
 async function submitAPI(fd){let r=await fetch(CFG.API_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"application/json"},body:JSON.stringify(fd)});return true}
 
 function getProds(){let p=[];document.querySelectorAll(".prod-cat.sel").forEach(c=>{let cn=c.dataset.cat;c.querySelectorAll(".sub-t.sel").forEach(s=>{if(s.textContent.trim()==="Other"){let ot=document.getElementById("accessoriesOtherText").value;if(ot)p.push(cn+":"+ot)}else p.push(cn+":"+s.textContent.trim())})});return p.join(", ")}
 
-async function submitForm(){if(!valForm()){let fe=document.querySelector(".err.show");if(fe)fe.scrollIntoView({behavior:"smooth",block:"center"});return}let btn=document.getElementById("submitBtn");btn.classList.add("load");btn.disabled=true;let sv=S.val||parseInt(document.getElementById("customValueInput").value)||0,sess=getSess();let fd={driverName:sess?.name||document.getElementById("driverName").value,driverId:sess?.did||document.getElementById("driverId").value,vehicleReg:sess?.vreg||document.getElementById("vehicleReg").value,customerName:document.getElementById("customerName").value,customerPhone:document.getElementById("customerPhone").value,altPhone:document.getElementById("altPhone").value,gpsLat:document.getElementById("gpsLat").value,gpsLng:document.getElementById("gpsLng").value,county:document.getElementById("county").value,town:document.getElementById("town").value,landmark:document.getElementById("landmark").value,customerType:document.getElementById("customerType").value,customerTypeOther:document.getElementById("customerTypeOtherInput").value,projectType:document.getElementById("projectType").value,projectTypeOther:document.getElementById("projectTypeOtherInput").value,roofingRequirement:document.getElementById("roofingReq").value,purchaseTimeline:document.getElementById("timeline").value,products:getProds(),colorSpec:document.getElementById("colorSpec").value,leadTemperature:S.tmp,saleValue:sv,submittedAt:new Date().toISOString(),appVersion:CFG.VER};try{if(S.on){await submitAPI(fd);let lid=genLid();document.getElementById("leadIdDisplay").textContent=lid;document.getElementById("successModal").classList.add("act")}else{let lid=addQueue(fd);if(S.b64)await savePhoto(lid,S.b64);let q=getQueue(),p=q.filter(x=>x.status==="pending").length;document.getElementById("offlineSavedInfo").textContent=p+" lead(s) pending sync. Connect to internet to upload.";document.getElementById("offlineSavedModal").classList.add("act")}localStorage.removeItem(ST.DRAFT)}catch(e){console.error("Submit error:",e);let lid=addQueue(fd);if(S.b64)await savePhoto(lid,S.b64);let q=getQueue(),p=q.filter(x=>x.status==="pending").length;document.getElementById("offlineSavedInfo").textContent="Connection failed. "+p+" lead(s) saved for later sync.";document.getElementById("offlineSavedModal").classList.add("act")}finally{btn.classList.remove("load");btn.disabled=false}}
+async function submitForm(){
+  if(!valForm()){
+    let fe=document.querySelector(".err.show");
+    if(fe)fe.scrollIntoView({behavior:"smooth",block:"center"});
+    return;
+  }
+
+  if(S.on){
+    let ok=await checkDriverActiveNow();
+    if(!ok)return;
+  }
+
+  let btn=document.getElementById("submitBtn");
+  btn.classList.add("load");
+  btn.disabled=true;
+
+  let sv=S.val||parseInt(document.getElementById("customValueInput").value)||0,
+      sess=getSess();
+
+  let fd={
+    driverName:sess?.name||document.getElementById("driverName").value,
+    driverId:sess?.did||document.getElementById("driverId").value,
+    vehicleReg:sess?.vreg||document.getElementById("vehicleReg").value,
+    customerName:document.getElementById("customerName").value,
+    customerPhone:document.getElementById("customerPhone").value,
+    altPhone:document.getElementById("altPhone").value,
+    gpsLat:document.getElementById("gpsLat").value,
+    gpsLng:document.getElementById("gpsLng").value,
+    county:document.getElementById("county").value,
+    town:document.getElementById("town").value,
+    landmark:document.getElementById("landmark").value,
+    customerType:document.getElementById("customerType").value,
+    customerTypeOther:document.getElementById("customerTypeOtherInput").value,
+    projectType:document.getElementById("projectType").value,
+    projectTypeOther:document.getElementById("projectTypeOtherInput").value,
+    roofingRequirement:document.getElementById("roofingReq").value,
+    purchaseTimeline:document.getElementById("timeline").value,
+    products:getProds(),
+    colorSpec:document.getElementById("colorSpec").value,
+    leadTemperature:S.tmp,
+    saleValue:sv,
+    submittedAt:new Date().toISOString(),
+    appVersion:CFG.VER
+  };
+
+  try{
+    if(S.on){
+      await submitAPI(fd);
+
+      let lid=genLid();
+      document.getElementById("leadIdDisplay").textContent=lid;
+      document.getElementById("successModal").classList.add("act");
+
+    }else{
+      let lid=addQueue(fd);
+
+      if(S.b64)await savePhoto(lid,S.b64);
+
+      let q=getQueue(),
+          p=q.filter(x=>x.status==="pending").length;
+
+      document.getElementById("offlineSavedInfo").textContent=p+" lead(s) pending sync. Connect to internet to upload.";
+      document.getElementById("offlineSavedModal").classList.add("act");
+    }
+
+    localStorage.removeItem(ST.DRAFT);
+
+  }catch(e){
+    console.error("Submit error:",e);
+
+    let lid=addQueue(fd);
+
+    if(S.b64)await savePhoto(lid,S.b64);
+
+    let q=getQueue(),
+        p=q.filter(x=>x.status==="pending").length;
+
+    document.getElementById("offlineSavedInfo").textContent="Connection failed. "+p+" lead(s) saved for later sync.";
+    document.getElementById("offlineSavedModal").classList.add("act");
+
+  }finally{
+    btn.classList.remove("load");
+    btn.disabled=false;
+  }
+}
 function closeOfflineModal(){document.getElementById("offlineSavedModal").classList.remove("act");resetForm()}
 
 function openQueueModal(){let q=getQueue(),le=document.getElementById("queueList"),ce=document.getElementById("queueModalCount");ce.textContent="("+q.length+")";if(q.length===0){le.innerHTML='<div class="q-empty"><div class="e-ic">📭</div><p>No pending leads. All synced!</p></div>'}else{le.innerHTML=q.map(it=>{let sc=it.status==="synced"?"ok":it.status==="failed"?"fail":"pend",st=it.status==="synced"?"Synced":it.status==="failed"?"Failed":"Pending";return'<div class="q-it"><div class="q-h"><span class="q-id">'+it.lid+'</span><span class="q-st '+sc+'">'+st+'</span></div><div class="q-d">Customer: '+(it.data.customerName||"N/A")+'<br>Phone: '+(it.data.customerPhone||"N/A")+'<br>Created: '+new Date(it.created).toLocaleString()+'</div><div class="q-a"><button class="ed-btn" onclick="editQItem(\''+it.lid+'\')">Edit</button><button class="del-btn" onclick="delQItem(\''+it.lid+'\')">Delete</button></div></div>'}).join("")}document.getElementById("queueModal").classList.add("act")}
